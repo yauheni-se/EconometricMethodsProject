@@ -1,0 +1,178 @@
+---
+title: "Discussion of the results"
+author: "Yauheni Semianiuk"
+date: "8.06.2021"
+output:
+  html_document:
+    toc: yes
+    toc_float:
+      collapsed: no
+    number_sections: yes
+    df_print: paged
+    css: EconometricsCaseStudyMarkdown.css
+---
+<style type="text/css">
+ .main-container {
+   max-width: 1200px;
+   margin-left: auto;
+   margin-rigth: auto;
+   background-color: #d8d8d8;
+}
+ 
+ h1.title {
+  font: "Arial"
+  font-size: 22px;
+  font-weight: 600;
+  color: Black;
+  text-align: center;
+}
+
+.author, .date {
+  font-size: 18px;
+  font: "Arial";
+  color: Black;
+  text-align: center;  
+}
+
+body{
+  font: "Arial";
+  font-size: 16px;
+}
+</style>
+
+
+```{css, echo=FALSE}
+.watch-out {
+  font-weight: normal;
+  font-size: 16px;
+  background-color: #d5d5d5;
+  border: 1px floralWhite;
+  font-family: "Computer Modern";   #"Computer Modern" "Arial"
+}
+```
+
+```{r include=FALSE}
+knitr::opts_chunk$set(class.source = "watch-out", comment = NA, message=FALSE, warning = FALSE)
+```
+
+```{r include=FALSE}
+library(kableExtra)
+library(rmarkdown)
+library(knitr)
+
+library(dplyr)
+library(magrittr)
+library(zoo)
+library(ggplot2)
+library(AER)
+library(systemfit)
+setwd("C:/University/Econometric Methods")
+```
+
+<div align="justify">
+
+# First steps
+
+Before starting to complete the tasks specified in the homework, I imported the data using **read.csv2** function. After loading in the dataset the names of the columns were changed (just for simplification of typing its names) and original variables were converted to the time series data type (more precisely, to `yearmon zoo` class). It will be needed for the next part of the homework.
+
+```{r}
+data <- read.csv2("data.csv")
+
+data %<>%
+  rename(date=X, terminals_p1000=POS_terminals_per_1000ppl, cards_pc=Cards_per_capita) %>% 
+  mutate(date = as.yearmon(date,"%b.%y"),
+         terminals_p1000 = zoo(log10(terminals_p1000), order.by=date),
+         cards_pc = zoo(cards_pc, order.by=date))
+```
+
+<br/><br/>
+
+# Additional control variables
+
+The first task was to select additional control variables. As there weren't any instructions whether those variables should come from other datasets (like [world bank](https://data.worldbank.org/country/PL)), I used the original transformed variables as new control ones. I decided to apply square root, cube root and lag transformations to the explanatory variable `terminals_p1000`.
+
+>That exact transformations were selected because they do not caused the problem of multicollinearity. Moreover, It was pretty hard to deal with only one explanatory variable without other problems occurring (like overfitting, etc). 
+
+In order to get rid of NA values in lag-transformed variable, **na.locf** function was applied (it simply replaces NA values with last observed ones). I called this new dataset **data_iv**.
+
+```{r}
+data_iv <- data %>%
+  mutate(terms_sqrt=sqrt(abs(terminals_p1000)),
+         terms_lag=na.locf(lag(terminals_p1000)),
+         terms_cube=terminals_p1000^(1/3)
+         )
+```
+
+
+<br/><br/>
+
+# Simultaneity bias
+
+Simultaneity bias can be held with the help of **systemfit** function from `systemfit` package. We simply construct 2 equations and specify them as the first argument to the function. As we are interested only in one side of the equation, we print the coefficients only for the estimated impact of POS terminals on cards.
+
+```{r}
+cards <- cards_pc~terminals_p1000
+terminals <- cards_pc~terminals_p1000+terms_lag+terms_cube+terms_sqrt
+sys <- list(cards,terminals)
+instr <- ~terms_lag+terms_cube+terms_sqrt
+
+model_simult <- systemfit(sys, inst=instr, method="2SLS", data=data_iv)
+summary(model_simult)$eq[[1]]
+```
+
+Now we see, that increase of 1% of POS terminals per 1000 people causes average increase of `r 0.6460165/100` of cards per capita ceteris paribus.
+
+<br/><br/>
+
+# Estimating models
+
+The OLS model was estimated with the help of **lm** function. As it's not 2SLS we don't need to specify instrumental variables.
+
+```{r}
+model_ols <- lm(cards_pc~terminals_p1000, data=data)
+summary(model_ols)
+```
+
+The 2SLS model was estimated with the help of **ivreg** function from `AER` package. Here three instrumental variables are specified after the vertical line sign.
+
+```{r}
+model_2sls <- ivreg(cards_pc~terminals_p1000|terms_lag+terms_cube+terms_sqrt, data=data_iv)
+summary(model_2sls)
+```
+
+We see a difference in coefficietns estimated by two different models which can say us about endogeinity.
+
+<br/><br/>
+
+# Potential direction of the bias
+
+We can estimate potential direction of the bias only theoretically. We expect positive correlation between expalnatory variable and error term due to positive simultaneous relation between regressor and explained variable.
+
+
+
+
+<br/><br/>
+
+# Results of specification tests
+
+Strength and exogeinety of the instruments can be estimated with the help of Hausman, Sargan and F tests. They are automatically computed if we set argument *diagnostics=TRUE* in **summary** function.
+
+```{r}
+kable(summary(model_2sls, diagnostics=TRUE)$diagnostics, "html", digits =3, format.args = list(scientific = FALSE)) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = F, position = "center")
+```
+
+Unfortunately, according to Sargan test statistics we reject the H0 hypothesis, telling that there's no correlation between the instruments and the error term. Due to that fact, the results of the Hausman test are not reliable though they show us that the problem of endogeneity is solved. The reason for this is that the 2SLS model can be also biased and the comparisons between OLS and 2SLS which Hausman test computes are wrong. Th way to choose this problem is to use other instrumental variables. Another potential solution is to include more regressors into the original equation, which might solve endogeinity issue.
+
+However, F test statistic tells us that we should reject H0 meaning that at least one instrument is strongly correlated with explanatory variable. We can assure this result by constructing another model measuring the impact of instrumental variables on `terminals_p1000` and analyzing the t-statistic of each regressor.
+
+```{r}
+model_terms_ols <- lm(terminals_p1000~terms_sqrt+terms_lag+terms_cube, data=data_iv)
+
+kable(summary(model_terms_ols)$coefficients[, 3:4], "html", digits =3, format.args = list(scientific = FALSE)) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = F, position = "center")
+```
+
+Thank you for your time!
+
+<div>
